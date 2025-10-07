@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>智能账款分析工具 V7.6 (最终修正版)</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 20px; background-color: #f8f9fa; color: #333; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 20px; }
+        .card { background: #fff; border-radius: 8px; padding: 25px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1, h2, h3 { color: #343a40; }
+        h2 { border-bottom: 2px solid #007bff; padding-bottom: 10px; margin-top: 0; }
+        .upload-section { text-align: center; }
+        .upload-section label { font-weight: bold; font-size: 1.2em; cursor: pointer; color: #fff; background-color: #007bff; display: inline-block; padding: 15px 30px; border-radius: 8px; transition: background-color 0.3s; }
+        .upload-section label.disabled { background-color: #6c757d; cursor: not-allowed; }
+        .upload-section label:hover:not(.disabled) { background-color: #0056b3; }
+        .upload-section input[type="file"] { display: none; }
+        #file-info { margin-top: 15px; font-style: italic; color: #6c757d; }
+        .results-section { display: none; }
+        #summary-info { padding: 15px; background-color: #e9ecef; border-radius: 8px; margin-bottom: 25px; display: flex; flex-wrap: wrap; justify-content: space-around; text-align: center; gap: 10px; }
+        #summary-info div h3 { margin: 0 0 5px 0; color: #495057; font-size: 1.1em; }
+        #summary-info div p { margin: 0; font-size: 1.8em; font-weight: bold; }
+        #summary-info div p.income { color: #28a745; }
+        #summary-info div p.expense { color: #dc3545; }
+        #summary-info div p.ratio { color: #17a2b8; }
+        .analysis-container { display: flex; flex-wrap: wrap; gap: 20px; }
+        .chart-container { flex: 1 1 400px; min-width: 300px; }
+        .table-container { flex: 1 1 400px; min-width: 300px; }
+        .message-box { display: none; text-align: center; padding: 15px; margin-top: 15px; border-radius: 5px; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .loading { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #dee2e6; padding: 10px; text-align: left; word-break: break-all; }
+        th { background-color: #f2f3f5; font-weight: bold; }
+        td:nth-child(2), td:nth-child(3) { text-align: right; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>智能账款分析工具 V7.6 (最终修正版)</h1>
+        <p>自动识别平台，内置拼多多“仅退款”精准检测引擎</p>
+    </div>
+
+    <div class="message-box error" id="library-error-box"></div>
+    
+    <div class="card">
+        <div class="upload-section">
+            <label for="csv-file" id="upload-label">选择一个账单文件 (CSV)</label>
+            <input type="file" id="csv-file" accept=".csv,.txt" disabled>
+            <div id="file-info">请先确保网络连接正常</div>
+        </div>
+    </div>
+
+    <div class="message-box loading" id="loading-box">正在解析和分析文件，请稍候...</div>
+    <div class="message-box error" id="error-box"></div>
+
+    <div class="card results-section" id="results-section">
+        <h2 id="report-title">分析报告</h2>
+        <div id="summary-info"></div>
+        <div class="analysis-container">
+            <div class="chart-container">
+                <h3>运营费用构成图</h3>
+                <canvas id="expense-chart"></canvas>
+            </div>
+            <div class="table-container">
+                <h3>运营费用明细表</h3>
+                <div id="expense-table"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const fileInput = document.getElementById('csv-file');
+    const uploadLabel = document.getElementById('upload-label');
+    const fileInfo = document.getElementById('file-info');
+    const loadingBox = document.getElementById('loading-box');
+    const errorBox = document.getElementById('error-box');
+    const libraryErrorBox = document.getElementById('library-error-box');
+    const resultsSection = document.getElementById('results-section');
+    const reportTitle = document.getElementById('report-title');
+    let chartInstance = null;
+    
+    window.addEventListener('load', () => {
+        if (typeof Chart === 'undefined' || typeof Papa === 'undefined') {
+            libraryErrorBox.innerHTML = '<strong>初始化失败！</strong><br>核心分析库未能加载，请检查您的网络连接是否正常，然后刷新页面重试。';
+            libraryErrorBox.style.display = 'block';
+            fileInfo.textContent = '工具已禁用，请刷新';
+            uploadLabel.classList.add('disabled');
+        } else {
+            fileInput.disabled = false;
+            uploadLabel.classList.remove('disabled');
+            fileInfo.textContent = '尚未选择文件';
+        }
+    });
+
+    fileInput.addEventListener('change', (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        fileInfo.textContent = `已选择文件: ${file.name}`;
+        resultsSection.style.display = 'none';
+        errorBox.style.display = 'none';
+        loadingBox.style.display = 'block';
+
+        Papa.parse(file, {
+            encoding: "gbk",
+            skipEmptyLines: true,
+            complete: (results) => {
+                try {
+                    const data = results.data;
+                    if (data.length < 2) throw new Error("文件内容为空或格式不正确。");
+
+                    let headers = data.find(row => Array.isArray(row) && (platformProcessors.jd.detector(row) || platformProcessors.pdd.detector(row) || platformProcessors.dy.detector(row)));
+                    if (!headers) throw new Error("无法自动识别平台类型。请确认上传的是京东、拼多多或抖音的原始账单文件。");
+                    
+                    let detectedPlatform = null;
+                    for (const key in platformProcessors) {
+                        if (platformProcessors[key].detector(headers)) {
+                            detectedPlatform = key;
+                            break;
+                        }
+                    }
+
+                    const platform = platformProcessors[detectedPlatform];
+                    const analysisResult = platform.processor(data);
+                    displayResults(platform.name, analysisResult);
+
+                } catch (error) {
+                    showError(error.message);
+                    console.error(error);
+                } finally {
+                    loadingBox.style.display = 'none';
+                }
+            },
+            error: (err) => {
+                showError(`文件解析失败: ${err.message}`);
+                loadingBox.style.display = 'none';
+            }
+        });
+    });
+
+    const platformProcessors = {
+        jd: {
+            name: "京东",
+            detector: (headers) => headers.includes('费用项') && headers.includes('收支方向') && headers.includes('订单编号'),
+            processor: (data) => {
+                const header = data[0].map(h => String(h || '').trim());
+                const amountIndex = header.indexOf('金额');
+                const directionIndex = header.indexOf('收支方向');
+                const typeIndex = header.indexOf('费用项');
+
+                let totalIncome = 0, totalExpenses = 0, expenseSummary = {};
+                for (let i = 1; i < data.length; i++) {
+                    const row = data[i];
+                    if (row.length < header.length) continue;
+                    const amount = parseFloat(row[amountIndex]);
+                    if (isNaN(amount)) continue;
+
+                    if (row[directionIndex] === '收入') {
+                        totalIncome += Math.abs(amount);
+                    } else if (row[directionIndex] === '支出') {
+                        const expenseType = row[typeIndex] || '未知费用';
+                        if (expenseType.includes('货款') || expenseType.includes('退款') || expenseType.includes('提现')) {
+                            continue;
+                        }
+                        const absAmount = Math.abs(amount);
+                        totalExpenses += absAmount;
+                        expenseSummary[expenseType] = (expenseSummary[expenseType] || 0) + absAmount;
+                    }
+                }
+                return { totalIncome, totalExpenses, expenseSummary };
+            }
+        },
+        pdd: {
+            name: "拼多多",
+            detector: (headers) => headers.includes('商户订单号') && headers.some(h => String(h || '').includes('收入金额')) && headers.some(h => String(h || '').includes('支出金额')),
+            processor: (data) => {
+                let headerRowIndex = data.findIndex(row => Array.isArray(row) && row.includes('商户订单号'));
+                if (headerRowIndex === -1) throw new Error('拼多多文件格式无法识别表头。');
+                
+                const header = data[headerRowIndex].map(h => String(h || '').trim());
+                const orderIdIndex = header.indexOf('商户订单号');
+                const incomeIndex = header.findIndex(h => h.includes('收入金额'));
+                const expenseIndex = header.findIndex(h => h.includes('支出金额'));
+                const typeIndex = header.findIndex(h => h.includes('账务类型'));
+
+                const orders = {};
+                let nonOrderExpenses = [];
+
+                for (let i = headerRowIndex + 1; i < data.length; i++) {
+                    const row = data[i];
+                    if (row.length < header.length) continue;
+
+                    const orderId = row[orderIdIndex];
+                    const income = parseFloat(row[incomeIndex]) || 0;
+                    const expense = parseFloat(row[expenseIndex]) || 0;
+                    const type = row[typeIndex] || '未知费用';
+
+                    if (orderId) {
+                        if (!orders[orderId]) {
+                            // --- 核心修改：细分收入类型 ---
+                            orders[orderId] = { transactionIncome: 0, otherIncome: 0, refund: 0, fees: [] };
+                        }
+                        if (income > 0) {
+                            // --- 核心修改：判断是否为交易收入 ---
+                            if (type.includes('交易收入')) {
+                                orders[orderId].transactionIncome += income;
+                            } else {
+                                orders[orderId].otherIncome += income;
+                            }
+                        }
+                        if (expense !== 0) {
+                            if (type.includes('退款')) {
+                                orders[orderId].refund += Math.abs(expense);
+                            } else {
+                                orders[orderId].fees.push({ type: type, amount: Math.abs(expense) });
+                            }
+                        }
+                    } else {
+                        if (expense !== 0) {
+                            nonOrderExpenses.push({ type: type, amount: Math.abs(expense) });
+                        }
+                    }
+                }
+
+                let totalIncome = 0, totalExpenses = 0, expenseSummary = {};
+
+                for (const orderId in orders) {
+                    const order = orders[orderId];
+                    totalIncome += order.transactionIncome + order.otherIncome;
+
+                    // --- 核心修复：用交易收入作为判断基准 ---
+                    const transactionIncomeInCents = Math.round(order.transactionIncome * 100);
+                    const refundInCents = Math.round(order.refund * 100);
+
+                    if (refundInCents > 0 && refundInCents < transactionIncomeInCents) {
+                        const partialRefundAmount = order.refund;
+                        expenseSummary['仅退款'] = (expenseSummary['仅退款'] || 0) + partialRefundAmount;
+                        totalExpenses += partialRefundAmount;
+                    }
+
+                    for (const fee of order.fees) {
+                        if (fee.type.includes('货款') || fee.type.includes('提现')) continue;
+                        expenseSummary[fee.type] = (expenseSummary[fee.type] || 0) + fee.amount;
+                        totalExpenses += fee.amount;
+                    }
+                }
+
+                for (const expense of nonOrderExpenses) {
+                    if (expense.type.includes('货款') || expense.type.includes('提现') || expense.type.includes('退款')) continue;
+                    expenseSummary[expense.type] = (expenseSummary[expense.type] || 0) + expense.amount;
+                    totalExpenses += expense.amount;
+                }
+                
+                return { totalIncome, totalExpenses, expenseSummary };
+            }
+        },
+        dy: {
+            name: "抖音小店",
+            detector: (headers) => headers.includes('动账方向') && headers.includes('动账金额') && headers.includes('动账场景'),
+            processor: (data) => {
+                const header = data[0].map(h => String(h || '').trim());
+                const amountIndex = header.indexOf('动账金额');
+                const directionIndex = header.indexOf('动账方向');
+                const typeIndex = header.indexOf('动账场景');
+
+                let totalIncome = 0, totalExpenses = 0, expenseSummary = {};
+                for (let i = 1; i < data.length; i++) {
+                    const row = data[i];
+                    if (row.length < header.length) continue;
+                    const amount = parseFloat(row[amountIndex]);
+                    if (isNaN(amount)) continue;
+
+                    if (row[directionIndex] === '入账') {
+                        totalIncome += amount;
+                    } else if (row[directionIndex] === '出账') {
+                        const expenseType = row[typeIndex] || '未知费用';
+                        if (expenseType.includes('货款') || expenseType.includes('退款') || expenseType.includes('提现')) {
+                            continue;
+                        }
+                        totalExpenses += amount;
+                        expenseSummary[expenseType] = (expenseSummary[expenseType] || 0) + amount;
+                    }
+                }
+                return { totalIncome, totalExpenses, expenseSummary };
+            }
+        }
+    };
+    
+    function displayResults(platformName, results) {
+        resultsSection.style.display = 'block';
+        reportTitle.textContent = `${platformName} 账单分析报告`;
+
+        const { totalIncome, totalExpenses, expenseSummary } = results;
+        const summaryContainer = document.getElementById('summary-info');
+        const expenseRatio = totalIncome > 0 ? (totalExpenses / totalIncome * 100).toFixed(2) : 0;
+        
+        summaryContainer.innerHTML = `
+            <div><h3>总收入 (元)</h3><p class="income">${totalIncome.toFixed(2)}</p></div>
+            <div><h3>总运营费用 (元)</h3><p class="expense">${totalExpenses.toFixed(2)}</p></div>
+            <div><h3>运营费用占比</h3><p class="ratio">${expenseRatio}%</p></div>
+        `;
+        renderChart(expenseSummary);
+        renderExpenseTable(expenseSummary, totalExpenses);
+    }
+    
+    function renderChart(data) {
+        const topN = 10;
+        const sortedData = Object.entries(data).filter(([, amount]) => amount > 0).sort(([, a], [, b]) => b - a);
+        const otherAmount = sortedData.slice(topN).reduce((sum, [, amount]) => sum + amount, 0);
+        
+        const chartData = sortedData.slice(0, topN);
+        const labels = chartData.map(item => item[0]);
+        const values = chartData.map(item => item[1]);
+        
+        if (otherAmount > 0) {
+            labels.push(`其他费用 (${sortedData.length - topN}项)`);
+            values.push(otherAmount);
+        }
+        
+        const ctx = document.getElementById('expense-chart').getContext('2d');
+        if (chartInstance) chartInstance.destroy();
+
+        chartInstance = new Chart(ctx, {
+            type: 'pie',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: '费用分布',
+                    data: values,
+                    backgroundColor: ['#FF6384', '#36A2EB', 'rgb(255, 205, 86)', 'rgb(75, 192, 192)', '#9966FF', '#FF9F40', '#E7E9ED', '#8DDF3C', '#F7464A', '#46BFBD', '#5856d6'],
+                }]
+            },
+            options: { responsive: true, plugins: { legend: { display: true, position: 'bottom' } } }
+        });
+    }
+
+    function renderExpenseTable(data, totalExpenses) {
+        const tableContainer = document.getElementById('expense-table');
+        const sortedData = Object.entries(data).filter(([, amount]) => amount > 0).sort(([, a], [, b]) => b - a);
+
+        let tableHtml = `<table>
+                            <tr>
+                                <th>运营费用类目</th>
+                                <th>金额 (元)</th>
+                                <th>费用占比</th>
+                            </tr>`;
+
+        if (sortedData.length === 0) {
+            tableHtml += `<tr><td colspan="3" style="text-align:center;">无运营费用项目</td></tr>`;
+        } else {
+            sortedData.forEach(([category, amount]) => {
+                const percentage = totalExpenses > 0 ? (amount / totalExpenses * 100).toFixed(2) : 0;
+                tableHtml += `<tr>
+                                <td>${category}</td>
+                                <td>${amount.toFixed(2)}</td>
+                                <td>${percentage}%</td>
+                            </tr>`;
+            });
+        }
+        tableHtml += `</table>`;
+        tableContainer.innerHTML = tableHtml;
+    }
+
+    function showError(message) {
+        errorBox.textContent = `错误: ${message}`;
+        errorBox.style.display = 'block';
+        resultsSection.style.display = 'none';
+    }
+</script>
+
+</body>
+</html>
