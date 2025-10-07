@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>智能账款分析工具 V7.6 (最终修正版)</title>
+    <title>智能账款分析工具 V7.8 (最终稳定版)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
     <style>
@@ -41,8 +41,8 @@
 
 <div class="container">
     <div class="header">
-        <h1>智能账款分析工具 V7.6 (最终修正版)</h1>
-        <p>自动识别平台，内置拼多多“仅退款”精准检测引擎</p>
+        <h1>智能账款分析工具 V7.8 (最终稳定版)</h1>
+        <p>自动识别平台，内置各平台专属解析引擎</p>
     </div>
 
     <div class="message-box error" id="library-error-box"></div>
@@ -110,21 +110,22 @@
         Papa.parse(file, {
             encoding: "gbk",
             skipEmptyLines: true,
+            // 关键改动：不再使用 header:true，确保所有处理器接收到一致的原始数据格式（数组的数组）
             complete: (results) => {
                 try {
                     const data = results.data;
                     if (data.length < 2) throw new Error("文件内容为空或格式不正确。");
 
-                    let headers = data.find(row => Array.isArray(row) && (platformProcessors.jd.detector(row) || platformProcessors.pdd.detector(row) || platformProcessors.dy.detector(row)));
-                    if (!headers) throw new Error("无法自动识别平台类型。请确认上传的是京东、拼多多或抖音的原始账单文件。");
-                    
+                    // 让每个处理器自己判断是否能处理这个文件
                     let detectedPlatform = null;
                     for (const key in platformProcessors) {
-                        if (platformProcessors[key].detector(headers)) {
+                        if (platformProcessors[key].detector(data)) {
                             detectedPlatform = key;
                             break;
                         }
                     }
+
+                    if (!detectedPlatform) throw new Error("无法自动识别平台类型。请确认上传的是京东、拼多多或抖音的原始账单文件。");
 
                     const platform = platformProcessors[detectedPlatform];
                     const analysisResult = platform.processor(data);
@@ -147,7 +148,10 @@
     const platformProcessors = {
         jd: {
             name: "京东",
-            detector: (headers) => headers.includes('费用项') && headers.includes('收支方向') && headers.includes('订单编号'),
+            detector: (data) => {
+                const headers = data[0] || [];
+                return headers.includes('费用项') && headers.includes('收支方向') && headers.includes('订单编号');
+            },
             processor: (data) => {
                 const header = data[0].map(h => String(h || '').trim());
                 const amountIndex = header.indexOf('金额');
@@ -168,9 +172,8 @@
                         if (expenseType.includes('货款') || expenseType.includes('退款') || expenseType.includes('提现')) {
                             continue;
                         }
-                        const absAmount = Math.abs(amount);
-                        totalExpenses += absAmount;
-                        expenseSummary[expenseType] = (expenseSummary[expenseType] || 0) + absAmount;
+                        totalExpenses += Math.abs(amount);
+                        expenseSummary[expenseType] = (expenseSummary[expenseType] || 0) + Math.abs(amount);
                     }
                 }
                 return { totalIncome, totalExpenses, expenseSummary };
@@ -178,7 +181,10 @@
         },
         pdd: {
             name: "拼多多",
-            detector: (headers) => headers.includes('商户订单号') && headers.some(h => String(h || '').includes('收入金额')) && headers.some(h => String(h || '').includes('支出金额')),
+            detector: (data) => {
+                // 拼多多的表头不在第一行，所以需要在多行中检测
+                return data.some(row => Array.isArray(row) && row.includes('商户订单号') && row.some(h => String(h).includes('收入金额')));
+            },
             processor: (data) => {
                 let headerRowIndex = data.findIndex(row => Array.isArray(row) && row.includes('商户订单号'));
                 if (headerRowIndex === -1) throw new Error('拼多多文件格式无法识别表头。');
@@ -203,11 +209,9 @@
 
                     if (orderId) {
                         if (!orders[orderId]) {
-                            // --- 核心修改：细分收入类型 ---
                             orders[orderId] = { transactionIncome: 0, otherIncome: 0, refund: 0, fees: [] };
                         }
                         if (income > 0) {
-                            // --- 核心修改：判断是否为交易收入 ---
                             if (type.includes('交易收入')) {
                                 orders[orderId].transactionIncome += income;
                             } else {
@@ -229,19 +233,16 @@
                 }
 
                 let totalIncome = 0, totalExpenses = 0, expenseSummary = {};
-
                 for (const orderId in orders) {
                     const order = orders[orderId];
                     totalIncome += order.transactionIncome + order.otherIncome;
-
-                    // --- 核心修复：用交易收入作为判断基准 ---
+                    
                     const transactionIncomeInCents = Math.round(order.transactionIncome * 100);
                     const refundInCents = Math.round(order.refund * 100);
 
                     if (refundInCents > 0 && refundInCents < transactionIncomeInCents) {
-                        const partialRefundAmount = order.refund;
-                        expenseSummary['仅退款'] = (expenseSummary['仅退款'] || 0) + partialRefundAmount;
-                        totalExpenses += partialRefundAmount;
+                        expenseSummary['仅退款'] = (expenseSummary['仅退款'] || 0) + order.refund;
+                        totalExpenses += order.refund;
                     }
 
                     for (const fee of order.fees) {
@@ -262,29 +263,51 @@
         },
         dy: {
             name: "抖音小店",
-            detector: (headers) => headers.includes('动账方向') && headers.includes('动账金额') && headers.includes('动账场景'),
+            detector: (data) => {
+                const headers = data[0] || [];
+                return headers.includes('动账方向') && headers.includes('动账金额') && headers.includes('动账场景');
+            },
             processor: (data) => {
                 const header = data[0].map(h => String(h || '').trim());
-                const amountIndex = header.indexOf('动账金额');
-                const directionIndex = header.indexOf('动账方向');
-                const typeIndex = header.indexOf('动账场景');
-
+                // PapaParse with header:false gives array of arrays, so convert to array of objects for easier processing
+                const jsonData = data.slice(1).map(row => {
+                    let obj = {};
+                    header.forEach((key, i) => obj[key] = row[i]);
+                    return obj;
+                });
+                
                 let totalIncome = 0, totalExpenses = 0, expenseSummary = {};
-                for (let i = 1; i < data.length; i++) {
-                    const row = data[i];
-                    if (row.length < header.length) continue;
-                    const amount = parseFloat(row[amountIndex]);
+                const feeColumns = [
+                    '平台服务费', '佣金', '服务商佣金', '渠道分成', '招商服务费', 
+                    '站外推广费', '其他分成', '实际平台补贴_运费'
+                ];
+
+                for (const row of jsonData) {
+                    const direction = row['动账方向'];
+                    const amount = parseFloat(row['动账金额']);
                     if (isNaN(amount)) continue;
 
-                    if (row[directionIndex] === '入账') {
+                    if (direction === '入账') {
                         totalIncome += amount;
-                    } else if (row[directionIndex] === '出账') {
-                        const expenseType = row[typeIndex] || '未知费用';
-                        if (expenseType.includes('货款') || expenseType.includes('退款') || expenseType.includes('提现')) {
+                        
+                        for (const colName of feeColumns) {
+                            if (row[colName]) {
+                                const feeAmount = parseFloat(row[colName]);
+                                if (!isNaN(feeAmount) && feeAmount !== 0) {
+                                    const absFee = Math.abs(feeAmount);
+                                    expenseSummary[colName] = (expenseSummary[colName] || 0) + absFee;
+                                    totalExpenses += absFee;
+                                }
+                            }
+                        }
+
+                    } else if (direction === '出账') {
+                        const scene = row['动账场景'] || '未知费用';
+                        if (scene.includes('货款') || scene.includes('退款') || scene.includes('提现')) {
                             continue;
                         }
+                        expenseSummary[scene] = (expenseSummary[scene] || 0) + amount;
                         totalExpenses += amount;
-                        expenseSummary[expenseType] = (expenseSummary[expenseType] || 0) + amount;
                     }
                 }
                 return { totalIncome, totalExpenses, expenseSummary };
